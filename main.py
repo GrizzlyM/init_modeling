@@ -8,7 +8,7 @@
     - 1 робот-манипулятор   (simpy.Resource, capacity=1)
 
 Потоки заявок:
-    - Генерация заготовок: random.triangular(100.0, 122.0, 122.0)  [правотреугольное]
+    - Генерация заготовок: random.triangular(100.0, 122.0, 100.0)  [левотреугольное]
     - Перемещение роботом:  random.uniform(10.0, 13.0)
     - Обработка на станке:  random.uniform(178.0, 200.0)
 """
@@ -21,14 +21,13 @@ import random
 # ══════════════════════════════════════════════════════════
 RANDOM_SEED  = 7          # зерно для воспроизводимости
 SIM_TIME     = 28_800     # горизонт моделирования, с (8 ч)
-
 NUM_MACHINES = 2          # обрабатывающих центров
 NUM_ROBOTS   = 1          # роботов-манипуляторов
 
-# Треугольное распределение (правотреугольное: мода = правый конец)
+# Треугольное распределение (левотреугольное: мода = левый конец)
 ARRIVAL_LOW  = 100.0
 ARRIVAL_HIGH = 122.0
-ARRIVAL_MODE = 122.0
+ARRIVAL_MODE = 100.0
 
 # Равномерное распределение времени перемещения роботом
 ROBOT_MIN  = 10.0
@@ -114,6 +113,13 @@ class Statistics:
 # ══════════════════════════════════════════════════════════
 #  Процесс одной детали
 # ══════════════════════════════════════════════════════════
+TRACE_LIMIT = 20  # трассировка первых N деталей
+
+def trace(env, part_id, event):
+    if part_id <= TRACE_LIMIT:
+        print(f"  {env.now:10.2f}  | Деталь {part_id:3d} | {event}")
+
+
 def part_process(
         env:      simpy.Environment,
         part_id:  int,
@@ -138,37 +144,47 @@ def part_process(
     # ── Шаг 1. Деталь попадает в бункер ──────────────────────────────
     stats.hopper_enter()
     entered_hopper_at = env.now
+    trace(env, part_id, "бункер (начало ожидания)")
 
     # ── Шаг 2. Захват робота (ожидание, если занят) ───────────────────
     with robot.request() as rob_req:
         yield rob_req
+        trace(env, part_id, "захват робота")
 
         # ── Шаг 3–4. Перемещение к станку + автоосвобождение робота ──
-        stats.hopper_leave(env.now - entered_hopper_at)   # выход из бункера
+        stats.hopper_leave(env.now - entered_hopper_at)
 
         travel_time = random.uniform(ROBOT_MIN, ROBOT_MAX)
+        trace(env, part_id, f"перемещение к станку ({travel_time:.2f} с)")
         yield env.timeout(travel_time)
         stats.robot_busy_time += travel_time
+        trace(env, part_id, "освобождение робота")
     # робот свободен
 
     # ── Шаг 5. Захват обрабатывающего центра ─────────────────────────
     with machines.request() as mc_req:
         yield mc_req
+        trace(env, part_id, "захват станка")
 
         # ── Шаг 6–7. Обработка + автоосвобождение станка ─────────────
         process_time = random.uniform(MACHINE_MIN, MACHINE_MAX)
+        trace(env, part_id, f"обработка ({process_time:.2f} с)")
         yield env.timeout(process_time)
         stats.machine_busy_time += process_time
+        trace(env, part_id, "освобождение станка")
     # станок свободен
 
     # ── Шаг 8. Захват робота для выгрузки ────────────────────────────
     with robot.request() as rob_req:
         yield rob_req
+        trace(env, part_id, "захват робота (выгрузка)")
 
         # ── Шаг 9–10. Перемещение на конвейер + освобождение ─────────
         travel_time = random.uniform(ROBOT_MIN, ROBOT_MAX)
+        trace(env, part_id, f"перемещение на конвейер ({travel_time:.2f} с)")
         yield env.timeout(travel_time)
         stats.robot_busy_time += travel_time
+        trace(env, part_id, "освобождение робота, выход из системы")
     # робот свободен, деталь покидает систему
 
     stats.parts_completed += 1
@@ -185,7 +201,7 @@ def part_generator(
 ):
     """
     Бесконечно генерирует заготовки с интервалом, подчинённым
-    правотреугольному распределению triangular(100, 122, 122).
+    левотреугольному распределению triangular(100, 122, 100).
     Каждая заготовка запускается как отдельный SimPy-процесс.
     """
     part_id = 0
@@ -211,6 +227,13 @@ def main():
     robot    = simpy.Resource(env, capacity=NUM_ROBOTS)
     machines = simpy.Resource(env, capacity=NUM_MACHINES)
     stats    = Statistics(env)
+
+    sep = "=" * 46
+    print(sep)
+    print(f"{'ТРАССИРОВКА (первые 20 деталей)':^46}")
+    print(sep)
+    print(f"  {'Время':>10}  | {'Деталь':^10} | Событие")
+    print(sep)
 
     env.process(part_generator(env, robot, machines, stats))
     env.run(until=SIM_TIME)
